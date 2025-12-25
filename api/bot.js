@@ -3,27 +3,28 @@ const Jimp = require('jimp');
 const path = require('path');
 const FormData = require('form-data');
 
+// 1. Get Token from Environment Variables
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// Add all your template filenames here:
+// 2. List your template filenames exactly as they appear in the folder
 const templates = [
   'template1.png',
   'template2.png'
 ];
 
 module.exports = async (req, res) => {
-  // Telegram webhooks are POST requests
+  // Only allow POST requests (Webhooks)
   if (req.method !== 'POST') {
-    return res.status(200).send('OK');
+    return res.status(200).send('Bot is running!');
   }
 
-  // Ensure body is parsed
-  const update =
-    typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
-
   try {
+    // Parse the incoming Telegram update
+    const update = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const message = update.message || update.edited_message;
+
+    // Safety checks
     if (!message || !message.text) {
       return res.status(200).send('no text');
     }
@@ -31,35 +32,43 @@ module.exports = async (req, res) => {
     const chatId = message.chat.id;
     const text = message.text.trim();
 
-    // Optional: handle /start separately
+    // 3. Handle "/start" command
     if (text === '/start') {
       await fetch(`${TELEGRAM_API}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: 'Send me any text and I will return a QR code centered on a random template.'
+          text: 'Send me any text and I will generate a QR code for you!'
         })
       });
       return res.status(200).send('ok');
     }
 
-    if (!text) {
-      return res.status(200).send('empty text');
+    // 4. Pick a random template
+    const templateFile = templates[Math.floor(Math.random() * templates.length)];
+    // Correct path to step out of 'api' folder and into 'templates'
+    const templatePath = path.join(process.cwd(), 'templates', templateFile);
+
+    // 5. Read the template image
+    let template;
+    try {
+      template = await Jimp.read(templatePath);
+    } catch (err) {
+      console.error(`Error loading template: ${templatePath}`, err);
+      // Fallback if template fails (send error message to user)
+      await fetch(`${TELEGRAM_API}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: 'Error loading template image.' })
+      });
+      return res.status(500).send('Template error');
     }
 
-    // 1) Pick a random template
-    const templateFile =
-      templates[Math.floor(Math.random() * templates.length)];
-    const templatePath = path.join(__dirname, '..', 'templates', templateFile);
-
-    const template = await Jimp.read(templatePath);
-
-    // 2) Compute QR size (e.g. 35% of smaller side)
+    // 6. Generate QR Code
     const minSide = Math.min(template.bitmap.width, template.bitmap.height);
-    const qrSize = Math.floor(minSide * 0.35);
+    const qrSize = Math.floor(minSide * 0.35); // QR is 35% of the image size
 
-    // 3) Generate QR code as PNG buffer
     const qrBuffer = await QRCode.toBuffer(text, {
       type: 'png',
       width: qrSize,
@@ -73,16 +82,16 @@ module.exports = async (req, res) => {
     const qrImage = await Jimp.read(qrBuffer);
     qrImage.resize(qrSize, qrSize);
 
-    // 4) Center QR onto template
+    // 7. Center the QR Code
     const x = Math.round((template.bitmap.width - qrImage.bitmap.width) / 2);
     const y = Math.round((template.bitmap.height - qrImage.bitmap.height) / 2);
 
     template.composite(qrImage, x, y);
 
-    // 5) Export final image
+    // 8. Convert to Buffer to send
     const outputBuffer = await template.getBufferAsync(Jimp.MIME_PNG);
 
-    // 6) Send to Telegram
+    // 9. Send Photo to Telegram
     const form = new FormData();
     form.append('chat_id', String(chatId));
     form.append('photo', outputBuffer, {
@@ -97,8 +106,9 @@ module.exports = async (req, res) => {
     });
 
     return res.status(200).send('ok');
+
   } catch (err) {
-    console.error('Error handling update', err);
-    return res.status(200).send('error');
+    console.error('Error handling update:', err);
+    return res.status(500).send('error');
   }
 };

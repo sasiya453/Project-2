@@ -1,9 +1,7 @@
 {
   "name": "telegram-qr-bot",
   "version": "1.0.0",
-  "scripts": {
-    "dev": "vercel dev"
-  },
+  "main": "api/bot.js",
   "dependencies": {
     "jimp": "^0.22.10",
     "qrcode": "^1.5.3",

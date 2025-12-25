@@ -1,114 +1,117 @@
+const TelegramBot = require('node-telegram-bot-api');
 const QRCode = require('qrcode');
 const Jimp = require('jimp');
 const path = require('path');
-const FormData = require('form-data');
 
-// 1. Get Token from Environment Variables
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+// Initialize bot with the token from environment variables.
+// We set { polling: false } because Vercel passes updates via webhooks.
+const token = process.env.TELEGRAM_BOT_TOKEN;
+if (!token) {
+  throw new Error('TELEGRAM_BOT_TOKEN is not set in environment variables.');
+}
+const bot = new TelegramBot(token, { polling: false });
 
-// 2. List your template filenames exactly as they appear in the folder
-const templates = [
-  'template1.png',
-  'template2.png'
-];
+// --- Bot Command Handlers ---
 
-module.exports = async (req, res) => {
-  // Only allow POST requests (Webhooks)
-  if (req.method !== 'POST') {
-    return res.status(200).send('Bot is running!');
-  }
+// Handle the /qr command
+bot.onText(/\/qr (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const textToEncode = match[1]; // The text sent after /qr
+
+  // Send a "sending photo" action to the user
+  bot.sendChatAction(chatId, 'upload_photo');
 
   try {
-    // Parse the incoming Telegram update
-    const update = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    const message = update.message || update.edited_message;
-
-    // Safety checks
-    if (!message || !message.text) {
-      return res.status(200).send('no text');
-    }
-
-    const chatId = message.chat.id;
-    const text = message.text.trim();
-
-    // 3. Handle "/start" command
-    if (text === '/start') {
-      await fetch(`${TELEGRAM_API}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: 'Send me any text and I will generate a QR code for you!'
-        })
-      });
-      return res.status(200).send('ok');
-    }
-
-    // 4. Pick a random template
-    const templateFile = templates[Math.floor(Math.random() * templates.length)];
-    // Correct path to step out of 'api' folder and into 'templates'
-    const templatePath = path.join(process.cwd(), 'templates', templateFile);
-
-    // 5. Read the template image
-    let template;
-    try {
-      template = await Jimp.read(templatePath);
-    } catch (err) {
-      console.error(`Error loading template: ${templatePath}`, err);
-      // Fallback if template fails (send error message to user)
-      await fetch(`${TELEGRAM_API}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text: 'Error loading template image.' })
-      });
-      return res.status(500).send('Template error');
-    }
-
-    // 6. Generate QR Code
-    const minSide = Math.min(template.bitmap.width, template.bitmap.height);
-    const qrSize = Math.floor(minSide * 0.35); // QR is 35% of the image size
-
-    const qrBuffer = await QRCode.toBuffer(text, {
-      type: 'png',
-      width: qrSize,
+    // 1. Generate high-resolution QR Code as a Buffer
+    const qrBuffer = await QRCode.toBuffer(textToEncode, {
+      errorCorrectionLevel: 'H', // High error correction
+      width: 600,                // Generate a large QR code
       margin: 1,
       color: {
         dark: '#000000',
-        light: '#FFFFFFFF'
+        light: '#ffffff'
       }
     });
 
+    // 2. Load the template image from the /public directory
+    // On Vercel, process.cwd() is the project root.
+    const templatePath = path.join(process.cwd(), 'public', 'template.jpg');
+    let templateImage;
+    try {
+      templateImage = await Jimp.read(templatePath);
+    } catch (err) {
+      console.error('Could not load template.jpg:', err);
+      bot.sendMessage(chatId, 'Error: Template image not found.');
+      return;
+    }
+
+    // 3. Load the generated QR code into Jimp
     const qrImage = await Jimp.read(qrBuffer);
-    qrImage.resize(qrSize, qrSize);
 
-    // 7. Center the QR Code
-    const x = Math.round((template.bitmap.width - qrImage.bitmap.width) / 2);
-    const y = Math.round((template.bitmap.height - qrImage.bitmap.height) / 2);
+    // 4. Calculate dimensions for centering
+    const tWidth = templateImage.bitmap.width;
+    const tHeight = templateImage.bitmap.height;
 
-    template.composite(qrImage, x, y);
+    // Determine a target size for the QR code.
+    // Let's make it 50% of the smaller dimension of the template for a good fit.
+    const targetQrSize = Math.min(tWidth, tHeight) * 0.5;
 
-    // 8. Convert to Buffer to send
-    const outputBuffer = await template.getBufferAsync(Jimp.MIME_PNG);
+    // Resize the QR code image
+    qrImage.resize(targetQrSize, targetQrSize);
 
-    // 9. Send Photo to Telegram
-    const form = new FormData();
-    form.append('chat_id', String(chatId));
-    form.append('photo', outputBuffer, {
-      filename: 'qr.png',
-      contentType: 'image/png'
+    // Calculate centering coordinates
+    const x = (tWidth - qrImage.bitmap.width) / 2;
+    const y = (tHeight - qrImage.bitmap.height) / 2;
+
+    // 5. Composite the QR code onto the template
+    templateImage.composite(qrImage, x, y);
+
+    // 6. Get the final image as a JPEG buffer
+    const finalImageBuffer = await templateImage.getBufferAsync(Jimp.MIME_JPEG);
+
+    // 7. Send the final image back to the user
+    await bot.sendPhoto(chatId, finalImageBuffer, {
+      caption: `Here is your QR code for:\n"${textToEncode}"`
     });
 
-    await fetch(`${TELEGRAM_API}/sendPhoto`, {
-      method: 'POST',
-      body: form,
-      headers: form.getHeaders()
-    });
+  } catch (error) {
+    console.error('Error processing /qr command:', error);
+    bot.sendMessage(chatId, 'Sorry, an error occurred while generating your QR code. Please try again.');
+  }
+});
 
-    return res.status(200).send('ok');
+// Handle /start and /help commands
+bot.onText(/\/start|\/help/, (msg) => {
+  const welcomeMessage = `
+Welcome to the QR Code Generator Bot! 🤖
 
-  } catch (err) {
-    console.error('Error handling update:', err);
-    return res.status(500).send('error');
+To generate a custom QR code, simply use the \`/qr\` command followed by the text or URL you want to encode.
+
+*Example:*
+\`/qr https://www.example.com\`
+\`/qr Hello World!\`
+`;
+  bot.sendMessage(msg.chat.id, welcomeMessage, { parse_mode: 'Markdown' });
+});
+
+
+// --- Vercel Serverless Function Handler ---
+
+// This is the main entry point for Vercel. It receives updates from Telegram.
+module.exports = async (req, res) => {
+  try {
+    if (req.method === 'POST') {
+      // Process the update sent by Telegram
+      bot.processUpdate(req.body);
+      // Respond quickly to Telegram to acknowledge receipt
+      res.status(200).send('OK');
+    } else {
+      // A simple response for browser visits to the function URL
+      res.status(200).send('Bot is active and waiting for webhooks from Telegram.');
+    }
+  } catch (error) {
+    console.error('Error in Vercel function:', error);
+    // IMPORTANT: Always return 200 OK to Telegram, even on error, to prevent retry loops.
+    res.status(200).send('Error processed');
   }
 };
